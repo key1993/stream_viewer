@@ -268,6 +268,13 @@ class MainActivity : AppCompatActivity() {
         val m3u8 = File(hlsDir, "stream.m3u8").absolutePath
         val fileUrl = "file://$m3u8"
 
+        // Delete existing m3u8 file to ensure we wait for new one
+        val m3u8File = File(m3u8)
+        if (m3u8File.exists()) {
+            m3u8File.delete()
+            writeLog("Deleted existing m3u8 file")
+        }
+
         // Primary: copy + bitstream filter (no encode)
         val copyCmd = (
             "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
@@ -310,7 +317,32 @@ class MainActivity : AppCompatActivity() {
             }
         }
         ffmpegSessionId = session.sessionId
+
+        // Wait for m3u8 file to be created by FFmpeg
+        writeLog("Waiting for m3u8 file to be created...")
+        waitForM3u8File(m3u8File)
+
         return fileUrl
+    }
+
+    private fun waitForM3u8File(m3u8File: File) {
+        val maxWaitTimeMs = 10000 // 10 seconds timeout
+        val checkIntervalMs = 500L // Check every 500ms
+        val startTime = System.currentTimeMillis()
+
+        while (System.currentTimeMillis() - startTime < maxWaitTimeMs) {
+            if (m3u8File.exists() && m3u8File.length() > 0) {
+                writeLog("✅ m3u8 file created: ${m3u8File.absolutePath} (${m3u8File.length()} bytes)")
+                return
+            }
+            try {
+                Thread.sleep(checkIntervalMs)
+            } catch (e: InterruptedException) {
+                writeLog("⚠️ Wait for m3u8 interrupted")
+                break
+            }
+        }
+        writeLog("⚠️ Timeout waiting for m3u8 file creation (waited ${System.currentTimeMillis() - startTime}ms)")
     }
 
     private fun stopFfmpeg() {
