@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintDimensionRatio="16:9" />
+
+    <ProgressBar
+        android:id="@+id/progress_bar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="@id/player_view"
+        app:layout_constraintBottom_toBottomOf="@id/player_view"
+        app:layout_constraintStart_toStartOf="@id/player_view"
+        app:layout_constraintEnd_toEndOf="@id/player_view"
+        tools:visibility="visible"/>
+
+    <EditText
+        android:id="@+id/et_stream_url"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:hint="Enter Stream URL (RTSP, HLS, etc.)"
+        android:inputType="textUri"
+        android:imeOptions="actionDone"
+        app:layout_constraintTop_toBottomOf="@id/player_view"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btn_play" />
+
+    <CheckBox
+        android:id="@+id/cb_ffmpeg_normalize"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Normalize via FFmpeg"
+        android:layout_marginStart="16dp"
+        app:layout_constraintTop_toBottomOf="@id/et_stream_url"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/btn_play"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:text="Play"
+        app:layout_constraintTop_toTopOf="@id/et_stream_url"
+        app:layout_constraintBottom_toBottomOf="@id/et_stream_url"
+        app:layout_constraintEnd_toStartOf="@id/btn_logs" />
+
+    <Button
+        android:id="@+id/btn_logs"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:text="Logs"
+        android:backgroundTint="@android:color/darker_gray"
+        app:layout_constraintTop_toTopOf="@id/et_stream_url"
+        app:layout_constraintBottom_toBottomOf="@id/et_stream_url"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>
