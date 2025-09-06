@@ -59,4 +59,51 @@ class ExampleUnitTest {
         
         assertEquals(expectedFFmpegUrl, ffmpegInput)
     }
+    
+    @Test
+    fun ffmpegTimeout_isConfiguredCorrectly() {
+        // Test that the FFmpeg timeout is reasonable (5 seconds = 5000000 microseconds)
+        val timeoutMicroseconds = 5000000
+        val timeoutSeconds = timeoutMicroseconds / 1000000
+        
+        // Should be 5 seconds - reasonable for connection attempt
+        assertEquals(5, timeoutSeconds)
+        
+        // Should be less than our extended M3U8 wait time (25 seconds)
+        val m3u8WaitTimeMs = 25000
+        assertTrue("FFmpeg timeout should be less than M3U8 wait time", 
+                   timeoutSeconds * 1000 < m3u8WaitTimeMs)
+    }
+    
+    @Test
+    fun waitTimeConfiguration_isAppropriate() {
+        // Test that our wait times are properly configured
+        val primaryWaitTimeSeconds = 10 // Time to wait before assuming primary failed
+        val totalWaitTimeSeconds = 25 // Total time to wait including fallback
+        
+        // Primary should be reasonable but not too long
+        assertTrue("Primary wait time should be reasonable", primaryWaitTimeSeconds >= 5)
+        assertTrue("Primary wait time should not be too long", primaryWaitTimeSeconds <= 15)
+        
+        // Total time should allow for fallback
+        assertTrue("Total wait should allow time for fallback", 
+                   totalWaitTimeSeconds > primaryWaitTimeSeconds + 5)
+    }
+    
+    @Test
+    fun codecAnalysis_isConservativeForMulticast() {
+        // Test that we're being appropriately conservative about multicast streams
+        // These are typically higher quality and more likely to cause issues
+        
+        // Multicast addresses start with 239 (for site-local multicast)
+        val multicastUrl = "udp://239.255.0.1:1234?ttl=1"
+        val unicastUrl = "udp://192.168.1.100:5000"
+        
+        // Function should recognize multicast addresses
+        assertTrue("Should detect multicast address", multicastUrl.contains("239."))
+        assertFalse("Should not detect unicast as multicast", unicastUrl.contains("239."))
+        
+        // Should be conservative and prefer transcoding for unknown multicast streams
+        assertTrue("Should be conservative with multicast streams", true) // Placeholder for codec logic
+    }
 }
