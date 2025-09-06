@@ -145,15 +145,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPlayerError(error: PlaybackException) {
                 binding.progressBar.visibility = View.GONE
-                val errorMsg = when (error.errorCode) {
-                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Network connection failed"
-                    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> "Invalid content type - expected MPEG-TS"
-                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "Stream format error - ensure OBS is sending MPEG-TS"
-                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "Decoder initialization failed - check codec support"
-                    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED -> "Decoder query failed - codec not supported"
-                    3003 -> "Source error - likely MPEG-TS parsing failed"
-                    else -> "Playback error: ${error.message}"
-                }
+                
                 writeLog("🎯 PLAYBACK ERROR DETAILS:")
                 writeLog("Error code: ${error.errorCode}")
                 writeLog("Error message: ${error.message}")
@@ -166,6 +158,17 @@ class MainActivity : AppCompatActivity() {
                     cause.stackTrace.forEach { element ->
                         writeLog("  at ${element.className}.${element.methodName}(${element.fileName}:${element.lineNumber})")
                     }
+                }
+                
+                val errorMsg = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Network connection failed"
+                    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> "Invalid content type - expected MPEG-TS"
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "Stream format error - ensure OBS is sending MPEG-TS"
+                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "Decoder initialization failed - check codec support"
+                    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED -> "Decoder query failed - codec not supported"
+                    3001 -> handleHlsParsingError(error)
+                    4003 -> handleCodecCapabilityError(error)
+                    else -> "Playback error: ${error.message}"
                 }
 
                 Toast.makeText(this@MainActivity, errorMsg, Toast.LENGTH_LONG).show()
@@ -230,11 +233,18 @@ class MainActivity : AppCompatActivity() {
         val sanitized = sanitizeObsUdpUrl(url)
         writeLog("Sanitized URL: '$sanitized'")
 
-        val useFfmpeg = binding.cbFfmpegNormalize.isChecked
+        // Check if we should force FFmpeg transcoding based on stream analysis
+        val shouldForceTranscode = shouldForceTranscoding(url)
+        val useFfmpeg = binding.cbFfmpegNormalize.isChecked || shouldForceTranscode
+        
+        if (shouldForceTranscode) {
+            writeLog("🔄 Forcing FFmpeg transcoding due to potential codec/format issues")
+        }
+        
         val playUri = if (useFfmpeg) {
             // Prefer HLS output for robustness (file-based playback)
-            val ffmpegInput = if (url.startsWith("udp://@")) url else url.replace("udp://", "udp://@")
-            startFfmpegToHls(ffmpegInput)
+            // Use the original URL (with @) for FFmpeg as it expects this format
+            startFfmpegToHls(url)
         } else sanitized
 
         // Build a MediaItem without explicit MIME type to let extractor auto-detect
@@ -275,45 +285,48 @@ class MainActivity : AppCompatActivity() {
             writeLog("Deleted existing m3u8 file")
         }
 
-        // Primary: copy + bitstream filter (no encode)
+        // Normalize URL for FFmpeg - ensure it has @ prefix for multicast
+        val ffmpegInput = if (inputUrl.startsWith("udp://@")) {
+            inputUrl
+        } else if (inputUrl.startsWith("udp://")) {
+            inputUrl.replace("udp://", "udp://@")
+        } else {
+            inputUrl
+        }
+        
+        writeLog("FFmpeg input URL: '$ffmpegInput'")
+
+        // Primary: copy + bitstream filter (no encode) - but with better error recovery
         val copyCmd = (
             "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
-            "-i '" + inputUrl + "' " +
+            "-timeout 10000000 " + // 10 second timeout for input
+            "-i '" + ffmpegInput + "' " +
             "-c:v copy -bsf:v h264_metadata=aud=insert+level=3.1 -bsf:v dump_extra " +
-            "-hls_time 1 -hls_list_size 6 -hls_flags delete_segments+append_list " +
+            "-avoid_negative_ts make_zero " +
+            "-hls_time 2 -hls_list_size 6 -hls_flags delete_segments+append_list " +
+            "-hls_start_number_source generic " +
             "-y '" + m3u8 + "'"
         )
         writeLog("FFmpeg HLS primary command: $copyCmd")
+        
+        var sessionCompleted = false
         val session = FFmpegKit.executeAsync(copyCmd) { session ->
+            synchronized(this) {
+                if (sessionCompleted) return@executeAsync
+                sessionCompleted = true
+            }
+            
             val rc = session.returnCode
             if (ReturnCode.isSuccess(rc)) {
                 writeLog("FFmpeg HLS (copy) finished successfully")
             } else if (ReturnCode.isCancel(rc)) {
                 writeLog("FFmpeg HLS (copy) cancelled")
             } else {
-                writeLog("FFmpeg HLS (copy) failed: code=$rc\n${'$'}{session.allLogsAsString}")
-                // Fallback: transcode baseline
-                val x264Cmd = (
-                    "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
-                    "-i '" + inputUrl + "' " +
-                    "-vf scale=1280:720 -pix_fmt yuv420p -c:v libx264 -preset ultrafast -tune zerolatency " +
-                    "-profile:v baseline -level:v 3.1 -g 30 -keyint_min 30 " +
-                    "-x264-params scenecut=0:ref=1:bframes=0:aud=1:repeat-headers=1:force-cfr=1 " +
-                    "-hls_time 1 -hls_list_size 6 -hls_flags delete_segments+append_list " +
-                    "-y '" + m3u8 + "'"
-                )
-                writeLog("FFmpeg HLS fallback command: $x264Cmd")
-                val s2 = FFmpegKit.executeAsync(x264Cmd) { s2 ->
-                    val rc2 = s2.returnCode
-                    if (ReturnCode.isSuccess(rc2)) {
-                        writeLog("FFmpeg HLS (x264) finished successfully")
-                    } else if (ReturnCode.isCancel(rc2)) {
-                        writeLog("FFmpeg HLS (x264) cancelled")
-                    } else {
-                        writeLog("FFmpeg HLS (x264) failed: code=$rc2\n${'$'}{s2.allLogsAsString}")
-                    }
-                }
-                ffmpegSessionId = s2.sessionId
+                writeLog("FFmpeg HLS (copy) failed: code=$rc")
+                writeLog("FFmpeg copy failure details: ${session.allLogsAsString}")
+                
+                // Immediate fallback: transcode with device-compatible settings
+                startFallbackTranscode(ffmpegInput, m3u8)
             }
         }
         ffmpegSessionId = session.sessionId
@@ -324,16 +337,60 @@ class MainActivity : AppCompatActivity() {
 
         return fileUrl
     }
+    
+    private fun startFallbackTranscode(inputUrl: String, m3u8Path: String) {
+        writeLog("🔄 Starting fallback transcode with device-compatible settings")
+        
+        val fallbackCmd = (
+            "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
+            "-timeout 10000000 " +
+            "-i '" + inputUrl + "' " +
+            "-vf scale=1280:720 -pix_fmt yuv420p " +
+            "-c:v libx264 -preset ultrafast -tune zerolatency " +
+            "-profile:v baseline -level:v 3.1 -g 30 -keyint_min 30 " +
+            "-x264-params scenecut=0:ref=1:bframes=0:aud=1:repeat-headers=1:force-cfr=1 " +
+            "-c:a aac -b:a 128k -ar 44100 " +
+            "-avoid_negative_ts make_zero " +
+            "-hls_time 2 -hls_list_size 6 -hls_flags delete_segments+append_list " +
+            "-hls_start_number_source generic " +
+            "-y '" + m3u8Path + "'"
+        )
+        writeLog("FFmpeg HLS fallback command: $fallbackCmd")
+        
+        val fallbackSession = FFmpegKit.executeAsync(fallbackCmd) { s2 ->
+            val rc2 = s2.returnCode
+            if (ReturnCode.isSuccess(rc2)) {
+                writeLog("FFmpeg HLS (transcode) finished successfully")
+            } else if (ReturnCode.isCancel(rc2)) {
+                writeLog("FFmpeg HLS (transcode) cancelled")
+            } else {
+                writeLog("FFmpeg HLS (transcode) failed: code=$rc2")
+                writeLog("FFmpeg transcode failure details: ${s2.allLogsAsString}")
+            }
+        }
+        ffmpegSessionId = fallbackSession.sessionId
+    }
 
     private fun waitForM3u8File(m3u8File: File) {
-        val maxWaitTimeMs = 10000 // 10 seconds timeout
+        val maxWaitTimeMs = 15000 // Increase to 15 seconds timeout
         val checkIntervalMs = 500L // Check every 500ms
         val startTime = System.currentTimeMillis()
 
         while (System.currentTimeMillis() - startTime < maxWaitTimeMs) {
             if (m3u8File.exists() && m3u8File.length() > 0) {
-                writeLog("✅ m3u8 file created: ${m3u8File.absolutePath} (${m3u8File.length()} bytes)")
-                return
+                // Additional validation: check if file contains valid HLS content
+                try {
+                    val content = m3u8File.readText()
+                    if (content.contains("#EXTM3U") && (content.contains("#EXTINF") || content.contains("#EXT-X-TARGETDURATION"))) {
+                        writeLog("✅ m3u8 file created: ${m3u8File.absolutePath} (${m3u8File.length()} bytes)")
+                        writeLog("📄 HLS file content preview: ${content.take(200)}...")
+                        return
+                    } else {
+                        writeLog("⚠️ M3U8 file exists but appears incomplete: ${content.take(100)}")
+                    }
+                } catch (e: Exception) {
+                    writeLog("⚠️ Error reading M3U8 file: ${e.message}")
+                }
             }
             try {
                 Thread.sleep(checkIntervalMs)
@@ -342,7 +399,19 @@ class MainActivity : AppCompatActivity() {
                 break
             }
         }
-        writeLog("⚠️ Timeout waiting for m3u8 file creation (waited ${System.currentTimeMillis() - startTime}ms)")
+        
+        // If we get here, either timeout or file is incomplete
+        if (m3u8File.exists()) {
+            try {
+                val content = m3u8File.readText()
+                writeLog("⚠️ Timeout: M3U8 file exists but may be incomplete (${m3u8File.length()} bytes)")
+                writeLog("📄 Final file content: $content")
+            } catch (e: Exception) {
+                writeLog("⚠️ Timeout: M3U8 file exists but unreadable: ${e.message}")
+            }
+        } else {
+            writeLog("⚠️ Timeout: M3U8 file was never created (waited ${System.currentTimeMillis() - startTime}ms)")
+        }
     }
 
     private fun stopFfmpeg() {
@@ -351,6 +420,107 @@ class MainActivity : AppCompatActivity() {
             try { com.arthenica.ffmpegkit.FFmpegKit.cancel(id) } catch (_: Exception) {}
         }
         ffmpegSessionId = null
+    }
+
+    private fun handleHlsParsingError(error: PlaybackException): String {
+        writeLog("🔍 HLS parsing error detected - checking if we should retry with transcoding")
+        
+        val causeMessage = error.cause?.message ?: ""
+        if (causeMessage.contains("contentIsMalformed") || causeMessage.contains("Loading finished before preparation")) {
+            writeLog("⚠️ HLS content appears malformed - likely FFmpeg copy mode issue")
+            
+            // If we're not already using FFmpeg transcoding, suggest it
+            if (!binding.cbFfmpegNormalize.isChecked) {
+                writeLog("💡 Suggesting to enable FFmpeg transcoding for this stream")
+                return "HLS stream malformed - try enabling 'FFmpeg Normalize' option"
+            } else {
+                writeLog("❌ Already using FFmpeg but still getting malformed HLS")
+                return "HLS parsing failed - stream may be incompatible"
+            }
+        }
+        
+        return "HLS parsing error - ${error.message}"
+    }
+    
+    private fun handleCodecCapabilityError(error: PlaybackException): String {
+        writeLog("🔍 Codec capability error detected")
+        
+        val causeMessage = error.cause?.message ?: ""
+        if (causeMessage.contains("NO_EXCEEDS_CAPABILITIES")) {
+            writeLog("⚠️ Stream format exceeds device decoder capabilities")
+            
+            // If we're not using FFmpeg transcoding, suggest it
+            if (!binding.cbFfmpegNormalize.isChecked) {
+                writeLog("💡 Suggesting to enable FFmpeg transcoding to reduce stream quality")
+                return "Video format too demanding for device - enable 'FFmpeg Normalize' option"
+            } else {
+                writeLog("❌ Still getting capability error despite transcoding - may need different settings")
+                return "Video decoder overloaded - stream may need further optimization"
+            }
+        }
+        
+        return "Video decoder error - ${error.message}"
+    }
+
+    private fun shouldForceTranscoding(url: String): Boolean {
+        // For UDP multicast streams that are likely to be high resolution/profile,
+        // we can proactively decide to use transcoding to avoid codec capability issues
+        if (url.contains("udp://") && url.contains("239.")) {
+            writeLog("🔍 Detected multicast UDP stream - checking if transcoding needed")
+            
+            // Check if device has limited video decoding capabilities
+            try {
+                val mediaCodecList = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+                val codecs = mediaCodecList.codecInfos
+                
+                var hasHighProfileSupport = false
+                var hasHighResolutionSupport = false
+                
+                for (codec in codecs) {
+                    if (codec.isEncoder) continue
+                    
+                    val types = codec.supportedTypes
+                    for (type in types) {
+                        if (type == "video/avc") {
+                            try {
+                                val capabilities = codec.getCapabilitiesForType(type)
+                                val videoCapabilities = capabilities.videoCapabilities
+                                
+                                // Check if codec supports high resolution (1920x1080)
+                                if (videoCapabilities != null) {
+                                    if (videoCapabilities.supportedWidths.upper >= 1920 && 
+                                        videoCapabilities.supportedHeights.upper >= 1080) {
+                                        hasHighResolutionSupport = true
+                                    }
+                                    
+                                    // Check if it's a hardware codec (usually more capable)
+                                    if (codec.name.contains("qti") || codec.name.contains("qcom")) {
+                                        hasHighProfileSupport = true
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                writeLog("❌ Error checking codec capabilities: ${e.message}")
+                            }
+                        }
+                    }
+                }
+                
+                writeLog("🎯 Codec analysis: highProfile=$hasHighProfileSupport, highRes=$hasHighResolutionSupport")
+                
+                // If device lacks good hardware codec support, force transcoding
+                if (!hasHighProfileSupport || !hasHighResolutionSupport) {
+                    writeLog("⚠️ Device may have limited codec capabilities - forcing transcoding")
+                    return true
+                }
+                
+            } catch (e: Exception) {
+                writeLog("❌ Failed to analyze codec capabilities: ${e.message}")
+                // When in doubt, use transcoding for multicast streams
+                return true
+            }
+        }
+        
+        return false
     }
 
     private fun checkCodecCapabilities() {
