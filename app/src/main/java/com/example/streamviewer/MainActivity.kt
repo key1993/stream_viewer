@@ -534,6 +534,7 @@ class MainActivity : AppCompatActivity() {
                 
                 var hasHighProfileSupport = false
                 var hasHighResolutionSupport = false
+                var hasReliableHardwareDecoder = false
                 
                 for (codec in codecs) {
                     if (codec.isEncoder) continue
@@ -552,9 +553,13 @@ class MainActivity : AppCompatActivity() {
                                         hasHighResolutionSupport = true
                                     }
                                     
-                                    // Check if it's a hardware codec (usually more capable)
+                                    // Check if it's a reliable hardware codec 
                                     if (codec.name.contains("qti") || codec.name.contains("qcom")) {
                                         hasHighProfileSupport = true
+                                        // Only trust primary hardware decoders, not low_latency variants
+                                        if (!codec.name.contains("low_latency")) {
+                                            hasReliableHardwareDecoder = true
+                                        }
                                     }
                                 }
                             } catch (e: Exception) {
@@ -564,11 +569,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 
-                writeLog("🎯 Codec analysis: highProfile=$hasHighProfileSupport, highRes=$hasHighResolutionSupport")
+                writeLog("🎯 Codec analysis: highProfile=$hasHighProfileSupport, highRes=$hasHighResolutionSupport, reliable=$hasReliableHardwareDecoder")
                 
-                // If device lacks good hardware codec support, force transcoding
-                if (!hasHighProfileSupport || !hasHighResolutionSupport) {
-                    writeLog("⚠️ Device may have limited codec capabilities - forcing transcoding")
+                // Be more conservative: force transcoding if any capability is missing
+                // or if only low-latency variants are available (often less reliable for complex streams)
+                if (!hasHighProfileSupport || !hasHighResolutionSupport || !hasReliableHardwareDecoder) {
+                    writeLog("⚠️ Device may have limited codec capabilities - forcing transcoding for safety")
                     return true
                 }
                 

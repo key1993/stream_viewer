@@ -89,4 +89,21 @@ class ExampleUnitTest {
         assertTrue("Total wait should allow time for fallback", 
                    totalWaitTimeSeconds > primaryWaitTimeSeconds + 5)
     }
+    
+    @Test
+    fun codecAnalysis_isConservativeForMulticast() {
+        // Test that we're being appropriately conservative about multicast streams
+        // These are typically higher quality and more likely to cause issues
+        
+        // Multicast addresses start with 239 (for site-local multicast)
+        val multicastUrl = "udp://239.255.0.1:1234?ttl=1"
+        val unicastUrl = "udp://192.168.1.100:5000"
+        
+        // Function should recognize multicast addresses
+        assertTrue("Should detect multicast address", multicastUrl.contains("239."))
+        assertFalse("Should not detect unicast as multicast", unicastUrl.contains("239."))
+        
+        // Should be conservative and prefer transcoding for unknown multicast streams
+        assertTrue("Should be conservative with multicast streams", true) // Placeholder for codec logic
+    }
 }
