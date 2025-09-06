@@ -299,7 +299,7 @@ class MainActivity : AppCompatActivity() {
         // Primary: copy + bitstream filter (no encode) - but with better error recovery
         val copyCmd = (
             "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
-            "-timeout 10000000 " + // 10 second timeout for input
+            "-timeout 5000000 " + // 5 second timeout for input (reduced from 10s)
             "-i '" + ffmpegInput + "' " +
             "-c:v copy -bsf:v h264_metadata=aud=insert+level=3.1 -bsf:v dump_extra " +
             "-avoid_negative_ts make_zero " +
@@ -317,23 +317,26 @@ class MainActivity : AppCompatActivity() {
             }
             
             val rc = session.returnCode
+            writeLog("FFmpeg primary session completed with return code: $rc")
             if (ReturnCode.isSuccess(rc)) {
                 writeLog("FFmpeg HLS (copy) finished successfully")
             } else if (ReturnCode.isCancel(rc)) {
                 writeLog("FFmpeg HLS (copy) cancelled")
             } else {
                 writeLog("FFmpeg HLS (copy) failed: code=$rc")
-                writeLog("FFmpeg copy failure details: ${session.allLogsAsString}")
+                val logs = session.allLogsAsString
+                writeLog("FFmpeg copy failure details: $logs")
                 
                 // Immediate fallback: transcode with device-compatible settings
                 startFallbackTranscode(ffmpegInput, m3u8)
             }
         }
         ffmpegSessionId = session.sessionId
+        writeLog("FFmpeg primary session started with ID: ${session.sessionId}")
 
-        // Wait for m3u8 file to be created by FFmpeg
+        // Wait for m3u8 file to be created by FFmpeg (either primary or fallback)
         writeLog("Waiting for m3u8 file to be created...")
-        waitForM3u8File(m3u8File)
+        waitForM3u8FileWithFallback(m3u8File)
 
         return fileUrl
     }
@@ -343,7 +346,7 @@ class MainActivity : AppCompatActivity() {
         
         val fallbackCmd = (
             "-hide_banner -nostdin -fflags nobuffer -flags low_delay " +
-            "-timeout 10000000 " +
+            "-timeout 5000000 " + // 5 second timeout for input
             "-i '" + inputUrl + "' " +
             "-vf scale=1280:720 -pix_fmt yuv420p " +
             "-c:v libx264 -preset ultrafast -tune zerolatency " +
@@ -359,16 +362,19 @@ class MainActivity : AppCompatActivity() {
         
         val fallbackSession = FFmpegKit.executeAsync(fallbackCmd) { s2 ->
             val rc2 = s2.returnCode
+            writeLog("FFmpeg fallback session completed with return code: $rc2")
             if (ReturnCode.isSuccess(rc2)) {
                 writeLog("FFmpeg HLS (transcode) finished successfully")
             } else if (ReturnCode.isCancel(rc2)) {
                 writeLog("FFmpeg HLS (transcode) cancelled")
             } else {
                 writeLog("FFmpeg HLS (transcode) failed: code=$rc2")
-                writeLog("FFmpeg transcode failure details: ${s2.allLogsAsString}")
+                val logs = s2.allLogsAsString
+                writeLog("FFmpeg transcode failure details: $logs")
             }
         }
         ffmpegSessionId = fallbackSession.sessionId
+        writeLog("FFmpeg fallback session started with ID: ${fallbackSession.sessionId}")
     }
 
     private fun waitForM3u8File(m3u8File: File) {
@@ -392,6 +398,59 @@ class MainActivity : AppCompatActivity() {
                     writeLog("⚠️ Error reading M3U8 file: ${e.message}")
                 }
             }
+            try {
+                Thread.sleep(checkIntervalMs)
+            } catch (e: InterruptedException) {
+                writeLog("⚠️ Wait for m3u8 interrupted")
+                break
+            }
+        }
+        
+        // If we get here, either timeout or file is incomplete
+        if (m3u8File.exists()) {
+            try {
+                val content = m3u8File.readText()
+                writeLog("⚠️ Timeout: M3U8 file exists but may be incomplete (${m3u8File.length()} bytes)")
+                writeLog("📄 Final file content: $content")
+            } catch (e: Exception) {
+                writeLog("⚠️ Timeout: M3U8 file exists but unreadable: ${e.message}")
+            }
+        } else {
+            writeLog("⚠️ Timeout: M3U8 file was never created (waited ${System.currentTimeMillis() - startTime}ms)")
+        }
+    }
+
+    private fun waitForM3u8FileWithFallback(m3u8File: File) {
+        val maxWaitTimeMs = 25000 // Extended timeout to allow for fallback transcoding
+        val checkIntervalMs = 500L // Check every 500ms
+        val startTime = System.currentTimeMillis()
+        var fallbackStarted = false
+
+        while (System.currentTimeMillis() - startTime < maxWaitTimeMs) {
+            // Check if file was created successfully
+            if (m3u8File.exists() && m3u8File.length() > 0) {
+                // Additional validation: check if file contains valid HLS content
+                try {
+                    val content = m3u8File.readText()
+                    if (content.contains("#EXTM3U") && (content.contains("#EXTINF") || content.contains("#EXT-X-TARGETDURATION"))) {
+                        writeLog("✅ m3u8 file created: ${m3u8File.absolutePath} (${m3u8File.length()} bytes)")
+                        writeLog("📄 HLS file content preview: ${content.take(200)}...")
+                        return
+                    } else {
+                        writeLog("⚠️ M3U8 file exists but appears incomplete: ${content.take(100)}")
+                    }
+                } catch (e: Exception) {
+                    writeLog("⚠️ Error reading M3U8 file: ${e.message}")
+                }
+            }
+            
+            // After 10 seconds, if no file and no fallback started, give up on primary
+            val elapsed = System.currentTimeMillis() - startTime
+            if (elapsed > 10000 && !fallbackStarted && !m3u8File.exists()) {
+                writeLog("⚠️ Primary FFmpeg session appears to have failed after 10s, allowing time for fallback")
+                fallbackStarted = true
+            }
+            
             try {
                 Thread.sleep(checkIntervalMs)
             } catch (e: InterruptedException) {
